@@ -176,18 +176,20 @@
                                                                  (map #(Channels/newChannel %) errs)
                                                                  errs]]]
                                     ;; Copy output from child process to destinations
-                                    (future (io! (let [buffer (ByteBuffer/allocate *buffer-size*)]
-                                                   (.clear buffer)
-                                                   (loop [bytes-read (.. source (read buffer))]
-                                                     (when (or (not (neg? bytes-read)) (not= 0 (.position buffer)))
-                                                       (doseq [dest dests]
-                                                         (.write dest (.flip buffer)))
-                                                       (.compact buffer)
-                                                       (recur (.. source (read buffer)))))
-                                                   (doseq [buffered streams]
-                                                     (.flush buffered)
-                                                     (when (#{stdout stderr} buffered)
-                                                       (.close buffered))))))))]
+                                    (future
+                                      (io!
+                                       (let [buffer (ByteBuffer/allocate *buffer-size*)]
+                                         (.clear buffer)
+                                         (loop [bytes-read (.. source (read buffer))]
+                                           (when (or (not (neg? bytes-read)) (not= 0 (.position buffer)))
+                                             (doseq [dest dests]
+                                               (.write dest (.flip buffer)))
+                                             (.compact buffer)
+                                             (recur (.. source (read buffer)))))
+                                         (doseq [buffered streams]
+                                           (.flush buffered)
+                                           (when-not (#{System/out System/err} buffered)
+                                             (.close buffered))))))))]
 
       ;; Record the command and working directory
       (spit command (str (prn-str args) work-dir \newline))
@@ -200,21 +202,23 @@
               in-source (Channels/newChannel (if (string? in)
                                                (ByteArrayInputStream. (.getBytes in))
                                                (io/input-stream in)))]
-          (future (io! (let [buffer (ByteBuffer/allocate *buffer-size*)]
-                         (.clear buffer)
-                         (loop [bytes-read (.. in-source (read buffer))]
-                           (when (or (not (neg? bytes-read)) (not= 0 (.position buffer)))
-                             (let [flipped (.flip buffer)]
-                               (.write child-stdin flipped)
-                               (.write stdin-channel flipped))
-                             (.compact buffer)
-                             (recur (.. in-source (read buffer)))))
-                         (doto child-stdin-stream
-                           .flush
-                           .close)
-                         (doto stdin
-                           .flush
-                           .close))))))
+          (future
+            (io!
+             (let [buffer (ByteBuffer/allocate *buffer-size*)]
+               (.clear buffer)
+               (loop [bytes-read (.. in-source (read buffer))]
+                 (when (or (not (neg? bytes-read)) (not= 0 (.position buffer)))
+                   (let [flipped (.flip buffer)]
+                     (.write child-stdin flipped)
+                     (.write stdin-channel flipped))
+                   (.compact buffer)
+                   (recur (.. in-source (read buffer)))))
+               (doto child-stdin-stream
+                 .flush
+                 .close)
+               (doto stdin
+                 .flush
+                 .close))))))
 
       (let [result (make-process-info :pid pid
                                       :start-time start-time
@@ -271,8 +275,9 @@
   output (:out) and its exit code (:exit).  See also $$."
   [& args]
   `(let [out# (ByteArrayOutputStream.)
-         err# (ByteArrayOutputStream.)]
-     {:exit ($? {:out out# :err err#} ~@args)
+         err# (ByteArrayOutputStream.)
+         exit# ($? {:out out# :err err#} ~@args)]
+     {:exit exit#
       :out (String. (.toByteArray out#))
       :err (String. (.toByteArray err#))}))
 
@@ -280,8 +285,7 @@
   "Executes an external command, returning its standard output
   as a string.  See also $$."
   [& args]
-  `(let [out# (ByteArrayOutputStream.)
-         err# (ByteArrayOutputStream.)]
+  `(let [out# (ByteArrayOutputStream.)]
      ($? {:out out#} ~@args)
      (String. (.toByteArray out#))))
 
@@ -290,9 +294,14 @@
   and returning its exit code.  See also $$."
   [& args]
   `(let [result# ($>? ~@args)]
-     (print (:out result#))
-     (print (:err result#))
+     (io!
+      (print (:out result#))
+      (print (:err result#)))
      (:exit result#)))
+
+#_(defmacro $->
+  ([form] `($ ~~(if (seq? form) (list ~@form) form)))
+)
 
 (defn $exit
   []
@@ -303,4 +312,7 @@
  ;; Example
   (let [text "bar"]
     ($> echo ~text))
- ($> ls "fo ba" ~*pwd* ~(string/trim-newline ($> echo 1))))
+  ($> ls "fo ba" ~*pwd* ~(string/trim-newline ($> echo 1)))
+  ($-> ls cat (> / Users bstiles tmp))
+
+  )
