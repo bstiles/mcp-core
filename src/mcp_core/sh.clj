@@ -71,20 +71,30 @@
   ^{:doc "Path of the directory to use as the working directory,
   overriding (System/getProperty \"user.dir\")"}
   *working-dir* nil)
-(set-validator! #'*working-dir* (fn [dir] (or (nil? dir) (.exists (java.io.File. dir)))))
+(set-validator! #'*working-dir*
+                (fn [dir]
+                  (if-not (or (nil? dir)
+                                (.exists (java.io.File. dir)))
+                    (throw (java.io.FileNotFoundException. dir))
+                    true)))
 
 (def *pushd-stack* '())
 
-(defn- working-dir
+(defn working-dir
   []
   (or *working-dir* (System/getProperty "user.dir")))
 
-(defn $cd
+(defn cd
   "Changes the working directory to the path specified (must exist),
   or $HOME if none is specified."
-  ([] ($cd (System/getProperty "user.home")))
+  ([] (cd (System/getProperty "user.home")))
   ([dir]
-     (alter-var-root #'*working-dir* (fn [_] (name dir)))))
+     (alter-var-root #'*working-dir*
+                     (fn [_] (-> (condp = (class dir)
+                                     clojure.lang.Named (java.io.File. (name dir))
+                                     java.io.File dir
+                                     java.lang.String (java.io.File. dir))
+                                 .getCanonicalPath)))))
 
 (defn $pushd
   "Changes the working directory to the path specified (must exist)
@@ -92,13 +102,13 @@
   with $popd."
   [dir]
   (alter-var-root #'*pushd-stack* conj *working-dir*)
-  ($cd dir))
+  (cd dir))
 
 (defn $popd
   "Changes the working directory to the one most recently pushed
   onto the pushd stack."
   []
-  (alter-var-root #'*pushd-stack* (fn [old] ($cd (peek old)) (drop 1 old))))
+  (alter-var-root #'*pushd-stack* (fn [old] (cd (peek old)) (drop 1 old))))
 
 (defn splice-args
   "INTERNAL"
@@ -302,6 +312,29 @@
 #_(defmacro $->
   ([form] `($ ~~(if (seq? form) (list ~@form) form)))
 )
+
+(defmacro abs-path
+  "Create a file path"
+  [& args]
+  `(.getAbsolutePath (java.io.File. (apply str java.io.File/separator
+                          (interpose java.io.File/separator
+                                     [~@(convert-to-strings (filter (comp not map?) args))])))))
+
+(defmacro rel-path
+  "Create a relative file path."
+  [& args]
+  `(java.io.File. (working-dir)
+                  (apply str (interpose java.io.File/separator
+                                        [~@(convert-to-strings (filter (comp not map?) args))]))))
+
+(defmacro $cd
+  [& args]
+  `(let [all# [~@(convert-to-strings args)]
+         head# (first all#)]
+    (cond
+     (#{".." "."} head#) (cd (rel-path ~@args))
+     (= "/" head#) (cd (abs-path ~@(next args)))
+     :else (apply cd [~@(convert-to-strings args)]))))
 
 (defn $exit
   []
