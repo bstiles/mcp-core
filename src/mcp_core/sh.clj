@@ -1,4 +1,5 @@
 (ns mcp-core.sh
+  "Provides the ability to execute and manage external processes."
   (:import (java.io BufferedInputStream BufferedOutputStream ByteArrayInputStream 
                     ByteArrayOutputStream LineNumberReader)
            (java.nio ByteBuffer)
@@ -60,7 +61,10 @@
   "Terminates the specified process(es)."
   [pid & pids]
   (let [pids (into #{pid} pids)]
-    (doseq [[_ proc-info] (filter (fn [[_ {pid :pid exit :exit}]] (and (pids pid) (not (future-done? exit)))) @*processes*)]
+    (doseq [[_ proc-info] (filter (fn [[_ {pid :pid exit :exit}]]
+                                    (and (pids pid)
+                                         (not (future-done? exit))))
+                                  @*processes*)]
       (.destroy (:process proc-info)))))
 
 (def
