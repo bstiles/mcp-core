@@ -7,13 +7,13 @@
 
 (def *configuration* (format "
 handlers= java.util.logging.ConsoleHandler, java.util.logging.FileHandler
-.level = ALL
+.level = INFO
 java.util.logging.FileHandler.pattern = %s
 java.util.logging.FileHandler.append = true
 java.util.logging.FileHandler.limit = 500000
 java.util.logging.FileHandler.count = 1000
 java.util.logging.FileHandler.formatter = java.util.logging.SimpleFormatter
-java.util.logging.FileHandler.level = ALL
+java.util.logging.FileHandler.level = INFO
 java.util.logging.ConsoleHandler.level = WARNING
 java.util.logging.ConsoleHandler.formatter = java.util.logging.SimpleFormatter
 " (str *logging-dir* "/mcp-%u.%g.log")))
