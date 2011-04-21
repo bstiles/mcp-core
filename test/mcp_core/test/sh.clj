@@ -27,10 +27,10 @@
                         (clean-dir dir))))
 
 (deftest $>?-1
-  (is (= {:exit 1 :out ""} ($>? false))))
+  (is (= {:exit 1 :err "" :out ""} ($>? false))))
 
 (deftest $>?-2
-  (is (= {:out "foo\n" :exit 0} ($>? echo foo))))
+  (is (= {:out "foo\n" :err "" :exit 0} ($>? echo foo))))
 
 (deftest echo
   (is (= "\n" ($> echo))))
@@ -99,3 +99,42 @@
 (deftest various-tokens-2
   (let [opts ["-Dfoo=bar" "-Xcheck:jni"]]
     (is (= "-Dfoo=bar -Xcheck:jni 6 org.foo\n" ($> echo ~@opts ~(* 2 3) org.foo)))))
+
+
+(deftest dir-pushing
+  (let [start (.getCanonicalPath (io/file (System/getProperty "user.dir")))
+        one (.getCanonicalPath (io/file "/tmp"))
+        two (.getCanonicalPath (io/file "/Users"))]
+    (is (= start (working-dir)))
+    ($popd)
+    (is (= start (working-dir)))
+    ($pushd one)
+    (is (= one (working-dir)))
+    ($popd)
+    (is (= start (working-dir)))
+    ($pushd one)
+    ($pushd two)
+    (is (= two (working-dir)))
+    ($popd)
+    (is (= one (working-dir)))
+    ($popd)
+    (is (= start (working-dir)))
+    ($popd)
+    (is (= start (working-dir)))))
+
+
+(deftest env-pushing
+  (is (= {} (env)))
+  ($push-env {:a :b})
+  (is (= {:a :b} (env)))
+  ($pop-env)
+  (is (= {} (env)))
+  ($push-env {:a :b})
+  ($push-env {:a :c})
+  (is (= {:a :c} (env)))
+  ($pop-env)
+  (is (= {:a :b} (env)))
+  ($pop-env)
+  (is (= {} (env)))
+  ($pop-env)
+  (is (= {} (env))))

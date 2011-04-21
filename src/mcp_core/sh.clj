@@ -83,6 +83,11 @@
                     true)))
 
 (def *pushd-stack* '())
+(def *env-stack* '())
+
+(defn env
+  []
+  (or (peek *env-stack*) {}))
 
 (defn working-dir
   []
@@ -94,25 +99,45 @@
   ([] (cd (System/getProperty "user.home")))
   ([dir]
      (alter-var-root #'*working-dir*
-                     (fn [_] (-> (condp = (class dir)
-                                     clojure.lang.Named (java.io.File. (name dir))
-                                     java.io.File dir
-                                     java.lang.String (java.io.File. dir))
-                                 .getCanonicalPath)))))
+                     (fn [_] (if dir
+                               (-> (condp = (class dir)
+                                      clojure.lang.Named (java.io.File. (name dir))
+                                      java.io.File dir
+                                      java.lang.String (java.io.File. dir))
+                                   .getCanonicalPath)
+                               nil)))))
 
 (defn $pushd
   "Changes the working directory to the path specified (must exist)
   and stores prior working directory on a stack that can be restored
   with $popd."
   [dir]
-  (alter-var-root #'*pushd-stack* conj *working-dir*)
+  (alter-var-root #'*pushd-stack* conj (working-dir))
   (cd dir))
 
 (defn $popd
   "Changes the working directory to the one most recently pushed
   onto the pushd stack."
   []
-  (alter-var-root #'*pushd-stack* (fn [old] (cd (peek old)) (drop 1 old))))
+  (alter-var-root #'*pushd-stack* (fn [old]
+                                    (cd (peek old))
+                                    (when-not (empty? old)
+                                      (pop old)))))
+
+(defn $push-env
+  "Changes the environment to the map specified
+  and stores prior environment on a stack that can be restored
+  with $pop-env."
+  [env]
+  (alter-var-root #'*env-stack* conj env))
+
+(defn $pop-env
+  "Changes the environment to the one most recently pushed
+  onto the env stack."
+  []
+  (alter-var-root #'*env-stack* (fn [old] (if-not (empty? old)
+                                            (pop old)
+                                            old))))
 
 (defn splice-args
   "INTERNAL"
@@ -137,6 +162,14 @@
   [args]
   (.getName (io/file (first args))))
 
+(defn- close-all
+  [closeables]
+  (doseq [x closeables]
+    (try
+      (.close x)
+      (catch Exception e
+        (log :info (str e))))))
+
 (defn sh-exec
   "Executes a process via Runtime.exec and captures the input/output.
   The first argument must be a map of options.  All subsequent arguments
@@ -154,11 +187,7 @@
   process' PID."
   [options & args]
   (log :debug (print-str "Calling:" (pr-str args)))
-  (let [options (merge {:out nil
-                        :err nil
-                        :in nil}
-                       options)
-        start-time (Date.)
+  (let [start-time (Date.)
         end-time (atom nil)
         work-dir (io/file (working-dir))
         process (.. (ProcessBuilder. (into-array String (concat ["bash" "-s"] args)))
@@ -166,14 +195,13 @@
                     start)
         out (:out options)
         err (:err options)]
-    
     (doto (io/writer (.getOutputStream process))
       (.write "echo $$ 1>&2\n")
       (.write "exec \"$@\"\n")
       .flush)
 
     (let [pid (try
-                (Integer/parseInt (.readLine (LineNumberReader. (io/reader (.getErrorStream process)))))
+                (Integer/parseInt (.readLine (io/reader (.getErrorStream process))))
                 (catch NumberFormatException e nil))
           child-stdout (Channels/newChannel (BufferedInputStream. (.getInputStream process)))
           child-stderr (Channels/newChannel (BufferedInputStream. (.getErrorStream process)))
@@ -183,56 +211,62 @@
                                                                         :dir-name (str (command-name args) "-" pid)))
           outs (concat [stdout] (when out (if (sequential? out) out [out])))
           errs (concat [stderr] (when err (if (sequential? err) err [err])))
-          transfer-threads (doall (for [[source dests streams] [[child-stdout
-                                                                 (map #(Channels/newChannel %) outs)
-                                                                 outs]
-                                                                [child-stderr
-                                                                 (map #(Channels/newChannel %) errs)
-                                                                 errs]]]
-                                    ;; Copy output from child process to destinations
-                                    (future
-                                      (io!
-                                       (let [buffer (ByteBuffer/allocate *buffer-size*)]
-                                         (.clear buffer)
-                                         (loop [bytes-read (.. source (read buffer))]
-                                           (when (or (not (neg? bytes-read)) (not= 0 (.position buffer)))
-                                             (doseq [dest dests]
-                                               (.write dest (.flip buffer)))
-                                             (.compact buffer)
-                                             (recur (.. source (read buffer)))))
-                                         (doseq [buffered streams]
-                                           (.flush buffered)
-                                           (when-not (#{System/out System/err} buffered)
-                                             (.close buffered))))))))]
+          transfer-threads (concat
+                            (doall
+                             (for [[source dests streams]
+                                   [[child-stdout
+                                     (map #(Channels/newChannel %) outs)
+                                     outs]
+                                    [child-stderr
+                                     (map #(Channels/newChannel %) errs)
+                                     errs]]]
+                               ;; Copy output from child process to destinations
+                               (future
+                                 (io!
+                                  (let [buffer (ByteBuffer/allocate *buffer-size*)]
+                                    (.clear buffer)
+                                    (loop [bytes-read (.. source (read buffer))]
+                                      (when (or (not (neg? bytes-read)) (not= 0 (.position buffer)))
+                                        (doseq [dest dests]
+                                          (.write dest (.flip buffer)))
+                                        (.compact buffer)
+                                        (recur (.. source (read buffer)))))
+                                    (doseq [buffered streams]
+                                      (.flush buffered)
+                                      (when-not (#{System/out System/err} buffered)
+                                        (.close buffered))))))))
+                            ;; Copy input to child process
+                            (if-let [in (:in options)]
+                              (let [child-stdin-stream (BufferedOutputStream. (.getOutputStream process))
+                                    child-stdin (Channels/newChannel child-stdin-stream)
+                                    stdin-channel (Channels/newChannel stdin)
+                                    in-source (Channels/newChannel (if (string? in)
+                                                                     (ByteArrayInputStream. (.getBytes in))
+                                                                     (io/input-stream in)))]
+                                [(future
+                                   (io!
+                                    (let [buffer (ByteBuffer/allocate *buffer-size*)]
+                                      (.clear buffer)
+                                      (loop [bytes-read (.. in-source (read buffer))]
+                                        (when (or (not (neg? bytes-read)) (not= 0 (.position buffer)))
+                                          (let [flipped (.flip buffer)]
+                                            (.write child-stdin flipped)
+                                            (.write stdin-channel flipped))
+                                          (.compact buffer)
+                                          (recur (.. in-source (read buffer)))))
+                                      (doto child-stdin-stream
+                                        .flush
+                                        .close)
+                                      (doto stdin
+                                        .flush
+                                        .close))))])
+                              (.close stdin)))]
 
       ;; Record the command and working directory
       (spit command (str (prn-str args) work-dir \newline))
+      (.close command)
 
-      ;; Copy input to child process
-      (when-let [in (:in options)]
-        (let [child-stdin-stream (BufferedOutputStream. (.getOutputStream process))
-              child-stdin (Channels/newChannel child-stdin-stream)
-              stdin-channel (Channels/newChannel stdin)
-              in-source (Channels/newChannel (if (string? in)
-                                               (ByteArrayInputStream. (.getBytes in))
-                                               (io/input-stream in)))]
-          (future
-            (io!
-             (let [buffer (ByteBuffer/allocate *buffer-size*)]
-               (.clear buffer)
-               (loop [bytes-read (.. in-source (read buffer))]
-                 (when (or (not (neg? bytes-read)) (not= 0 (.position buffer)))
-                   (let [flipped (.flip buffer)]
-                     (.write child-stdin flipped)
-                     (.write stdin-channel flipped))
-                   (.compact buffer)
-                   (recur (.. in-source (read buffer)))))
-               (doto child-stdin-stream
-                 .flush
-                 .close)
-               (doto stdin
-                 .flush
-                 .close))))))
+
 
       (let [result (make-process-info :pid pid
                                       :start-time start-time
@@ -242,6 +276,9 @@
                                                     (let [exit-code (.waitFor process)]
                                                       (swap! end-time (fn [_] (Date.)))
                                                       (log :info (print-str "PID:" pid "exited with" exit-code))
+                                                      (close-all [(.getOutputStream process)
+                                                                  (.getInputStream process)
+                                                                  (.getErrorStream process)])
                                                       exit-code))
                                       :args args
                                       :work-dir work-dir)]
