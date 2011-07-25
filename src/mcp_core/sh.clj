@@ -139,6 +139,14 @@
                                             (pop old)
                                             old))))
 
+(defmacro doin
+  [dir & body]
+  `(try
+     ($pushd ~dir)
+     (let [x# (do ~@body)]
+       x#)
+     (finally ($popd))))
+
 (defn splice-args
   "INTERNAL"
   [args]
@@ -339,6 +347,14 @@
   `(let [out# (ByteArrayOutputStream.)]
      ($? {:out out#} ~@args)
      (String. (.toByteArray out#))))
+
+(defmacro $>-n
+  "Executes an external command, returning its standard output
+  as a string trimmed of trailing newlines.  See also $$."
+  [& args]
+  `(let [out# (ByteArrayOutputStream.)]
+     ($? {:out out#} ~@args)
+     (string/trimr (String. (.toByteArray out#)))))
 
 (defmacro $
   "Executes an external command, printing its standard output
